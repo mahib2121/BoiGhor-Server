@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const app = express();
 const cors = require('cors');
-
+const stripe = require('stripe')(process.env.STRIPE)
 app.use(express.json());
 app.use(
     cors({
@@ -41,9 +41,6 @@ async function run() {
 
         console.log("MongoDB connected successfully");
 
-        // ============================
-        // BOOK ROUTES
-        // ============================
 
         app.get("/books", async (req, res) => {
             const result = await bookCollection.find().toArray();
@@ -55,10 +52,6 @@ async function run() {
             res.send(result);
         });
 
-        // ============================
-        // ORDER ROUTES
-        // ============================
-
         // GET ALL ORDERS
         app.get("/orders", async (req, res) => {
             const query = {};
@@ -69,6 +62,13 @@ async function run() {
             }
 
             const result = await ordersCollection.find(query).toArray();
+            res.send(result);
+        });
+
+        app.get("/orders/:id", async (req, res) => {
+            const id = req.params.id
+            const query = { _id: new ObjectId(id) }
+            const result = await ordersCollection.findOne(query);
             res.send(result);
         });
 
@@ -93,6 +93,43 @@ async function run() {
             const result = await ordersCollection.insertOne(order);
             res.send(result);
         });
+
+        //pyament gatway stripe 
+
+        app.post('/payment-checkout-session', async (req, res) => {
+            try {
+                const { cost, orderId, name, email } = req.body;
+
+                const amount = Math.round(Number(cost) * 100); // cents
+
+                const session = await stripe.checkout.sessions.create({
+                    payment_method_types: ['card'],
+                    line_items: [
+                        {
+                            price_data: {
+                                currency: 'usd',
+                                unit_amount: amount,
+                                product_data: {
+                                    name: name || 'Order Payment',
+                                },
+                            },
+                            quantity: 1,
+                        },
+                    ],
+                    mode: 'payment',
+                    customer_email: email,
+                    success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}&orderId=${orderId}`,
+                    cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancel`,
+                });
+
+                res.send({ url: session.url });
+            } catch (error) {
+                res.status(500).send({ error: error.message });
+            }
+        });
+
+
+
 
     } catch (err) {
         console.error(err);
