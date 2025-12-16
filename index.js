@@ -25,11 +25,18 @@ const client = new MongoClient(uri, {
         deprecationErrors: true,
     }
 });
+const verifyFBToken = (req, res, next) => {
+    console.log('heders', req.headers.authorization);
+    next()
+}
+
+
 
 
 
 let bookCollection;
 let ordersCollection;
+let paymentsCollection;
 
 async function run() {
     try {
@@ -38,12 +45,20 @@ async function run() {
         const db = client.db("boiGhor");
         bookCollection = db.collection("books");
         ordersCollection = db.collection("orders");
+        paymentsCollection = db.collection("payments");
 
         console.log("MongoDB connected successfully");
 
 
         app.get("/books", async (req, res) => {
             const result = await bookCollection.find().toArray();
+            res.send(result);
+        });
+
+        app.get("/books/:id", async (req, res) => {
+            const id = req.params.id
+            const query = { _id: new ObjectId(id) }
+            const result = await bookCollection.findOne(query);
             res.send(result);
         });
 
@@ -100,7 +115,7 @@ async function run() {
             try {
                 const { cost, orderId, name, email } = req.body;
 
-                const amount = Math.round(Number(cost) * 100); // cents
+                const amount = Math.round(Number(cost) * 100);
 
                 const session = await stripe.checkout.sessions.create({
                     payment_method_types: ['card'],
@@ -118,7 +133,13 @@ async function run() {
                     ],
                     mode: 'payment',
                     customer_email: email,
-                    success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}&orderId=${orderId}`,
+
+
+                    metadata: {
+                        orderId: orderId
+                    },
+
+                    success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
                     cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancel`,
                 });
 
@@ -128,8 +149,108 @@ async function run() {
             }
         });
 
+        app.patch('/payment-success', async (req, res) => {
+            try {
+                const { session_id } = req.query;
+
+                if (!session_id) {
+                    return res.status(400).send({
+                        success: false,
+                        message: 'session_id missing'
+                    });
+                }
 
 
+                const session = await stripe.checkout.sessions.retrieve(session_id);
+
+                if (session.payment_status !== 'paid') {
+                    return res.status(400).send({
+                        success: false,
+                        message: 'Payment not completed'
+                    });
+                }
+
+                const orderId = session.metadata?.orderId;
+                const paymentIntentId = session.payment_intent;
+
+                if (!orderId || !paymentIntentId) {
+                    return res.status(400).send({
+                        success: false,
+                        message: 'Invalid payment metadata'
+                    });
+                }
+
+
+                const alreadyPaid = await paymentsCollection.findOne({
+                    paymentId: paymentIntentId
+                });
+
+                if (alreadyPaid) {
+                    return res.send({
+                        success: true,
+                        message: 'Payment already processed',
+                        paymentId: paymentIntentId
+                    });
+                }
+
+
+                await ordersCollection.updateOne(
+                    { _id: new ObjectId(orderId) },
+                    {
+                        $set: {
+                            paymentStatus: 'paid',
+                            transactionId: paymentIntentId
+                        }
+                    }
+                );
+
+
+                const paymentDoc = {
+                    orderId: new ObjectId(orderId),
+                    email: session.customer_email || null,
+                    paymentId: paymentIntentId,
+                    amount: session.amount_total / 100,
+                    currency: session.currency,
+                    status: session.payment_status,
+                    createdAt: new Date()
+                };
+
+                await paymentsCollection.insertOne(paymentDoc);
+
+
+                res.send({
+                    success: true,
+                    message: 'Payment recorded successfully',
+                    paymentId: paymentIntentId
+                });
+
+            } catch (error) {
+                res.status(500).send({
+                    success: false,
+                    message: error.message
+                });
+            }
+        });
+
+
+        app.get("/payments", verifyFBToken, async (req, res) => {
+            try {
+                const { email } = req.query;
+
+                if (!email) {
+                    return res.status(400).send({ message: "Email is required Or Unauthorize access " });
+                }
+
+                const result = await paymentsCollection
+                    .find({ email })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.send(result);
+            } catch (error) {
+                res.status(500).send({ message: error.message });
+            }
+        });
 
     } catch (err) {
         console.error(err);
