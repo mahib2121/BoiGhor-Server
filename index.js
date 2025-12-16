@@ -25,12 +25,28 @@ const client = new MongoClient(uri, {
         deprecationErrors: true,
     }
 });
-const verifyFBToken = (req, res, next) => {
-    console.log('heders', req.headers.authorization);
+const verifyFBToken = async (req, res, next) => {
+
+    const token = req.headers.authorization
+    try {
+        const IdToken = token.split(' ')[1]
+        const decode = await admin.auth().verifyIdToken(IdToken)
+        console.log(decode);
+
+    }
+    catch (err) {
+        return res.status(401).send({ message: 'Unauthrize access ' })
+    }
     next()
 }
 
+const admin = require("firebase-admin");
 
+const serviceAccount = require("./boiGhorfirebase-adminsdk.json");
+
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+});
 
 
 
