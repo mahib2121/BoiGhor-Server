@@ -32,6 +32,7 @@ const verifyFBToken = async (req, res, next) => {
         const IdToken = token.split(' ')[1]
         const decode = await admin.auth().verifyIdToken(IdToken)
         console.log(decode);
+        req.decode_email = decode.email
 
     }
     catch (err) {
@@ -53,6 +54,7 @@ admin.initializeApp({
 let bookCollection;
 let ordersCollection;
 let paymentsCollection;
+let userCollection;
 
 async function run() {
     try {
@@ -62,8 +64,63 @@ async function run() {
         bookCollection = db.collection("books");
         ordersCollection = db.collection("orders");
         paymentsCollection = db.collection("payments");
+        userCollection = db.collection("users");
 
         console.log("MongoDB connected successfully");
+
+
+        // ---------- USERS ----------
+        app.post("/users", verifyFBToken, async (req, res) => {
+            const user = req.body;
+
+            if (req.decode_email !== user.email) {
+                return res.status(403).send({ message: "Forbidden" });
+            }
+
+            const existingUser = await userCollection.findOne({ email: user.email });
+            if (existingUser) {
+                return res.send({ message: "User already exists" });
+            }
+
+            const newUser = {
+                email: user.email,
+                displayName: user.displayName,
+                photoURL: user.photoURL,
+                role: "user",
+                createdAt: new Date()
+            };
+
+            const result = await userCollection.insertOne(newUser);
+            res.send(result);
+        });
+
+        // 1. GET ALL USERS (for the Table)
+        // verifyFBToken ensures only logged-in users can see this
+        app.get("/users", verifyFBToken, async (req, res) => {
+            const result = await userCollection.find().toArray();
+            res.send(result);
+        });
+
+        // 2. MAKE ADMIN (for the "Make Admin" button)
+        app.patch('/users/admin/:id', verifyFBToken, async (req, res) => {
+            const id = req.params.id;
+            const filter = { _id: new ObjectId(id) };
+            const updatedDoc = {
+                $set: {
+                    role: 'admin'
+                }
+            }
+            const result = await userCollection.updateOne(filter, updatedDoc);
+            res.send(result);
+        });
+
+        // 3. DELETE USER (for the "Delete" button)
+        app.delete('/users/:id', verifyFBToken, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) }
+            const result = await userCollection.deleteOne(query);
+            res.send(result);
+        });
 
 
         app.get("/books", async (req, res) => {
@@ -283,3 +340,4 @@ app.get("/", (req, res) => {
 app.listen(port, () => {
     console.log(`Server is running on port ${port}`);
 });
+
