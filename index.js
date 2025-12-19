@@ -152,6 +152,39 @@ async function run() {
             res.send({ role });
         });
 
+        // GET CURRENT USER PROFILE
+        app.get("/users/profile", verifyFBToken, async (req, res) => {
+            const email = req.decode_email;
+            const user = await userCollection.findOne({ email });
+
+            if (!user) {
+                return res.status(404).send({ message: "User not found" });
+            }
+
+            res.send(user);
+        });
+
+        // UPDATE CURRENT USER PROFILE
+        app.patch("/users/profile", verifyFBToken, async (req, res) => {
+            const email = req.decode_email;
+            const { displayName, photoURL } = req.body;
+
+            const result = await userCollection.updateOne(
+                { email },
+                {
+                    $set: {
+                        displayName,
+                        photoURL,
+                        updatedAt: new Date()
+                    }
+                }
+            );
+
+            res.send(result);
+        });
+
+
+
         // ================= BOOKS MANAGEMENT =================
 
         // GET ALL BOOKS (Public)
