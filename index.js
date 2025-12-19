@@ -102,17 +102,32 @@ async function run() {
         });
 
         // 2. MAKE ADMIN (for the "Make Admin" button)
-        app.patch('/users/admin/:id', verifyFBToken, async (req, res) => {
+        // UPDATE USER ROLE (admin only)
+        app.patch('/users/role/:id', verifyFBToken, async (req, res) => {
+            const requesterEmail = req.decode_email;
+            const { role } = req.body;
             const id = req.params.id;
-            const filter = { _id: new ObjectId(id) };
-            const updatedDoc = {
-                $set: {
-                    role: 'admin'
-                }
+
+            // allowed roles
+            const allowedRoles = ["user", "librarian", "admin"];
+            if (!allowedRoles.includes(role)) {
+                return res.status(400).send({ message: "Invalid role" });
             }
-            const result = await userCollection.updateOne(filter, updatedDoc);
+
+            // verify requester is admin
+            const requester = await userCollection.findOne({ email: requesterEmail });
+            if (requester?.role !== "admin") {
+                return res.status(403).send({ message: "Forbidden" });
+            }
+
+            const result = await userCollection.updateOne(
+                { _id: new ObjectId(id) },
+                { $set: { role } }
+            );
+
             res.send(result);
         });
+
 
         // 3. DELETE USER (for the "Delete" button)
         app.delete('/users/:id', verifyFBToken, async (req, res) => {
@@ -153,7 +168,7 @@ async function run() {
             res.send(result);
         });
 
-        // POST BOOK (Secured - Add New Book)
+        // POST BOOK (Add New Book)
         app.post("/books", verifyFBToken, async (req, res) => {
             const item = req.body;
             const result = await bookCollection.insertOne(item);
@@ -206,16 +221,13 @@ async function run() {
         );
 
 
-        // DELETE BOOK (Secured - Remove Book)
+        // DELETE BOOK (Remove Book)
         app.delete('/books/:id', verifyFBToken, async (req, res) => {
             const id = req.params.id;
             const query = { _id: new ObjectId(id) }
             const result = await bookCollection.deleteOne(query);
             res.send(result);
         });
-
-        // ====================================================
-
         // GET ALL ORDERS
         app.get("/orders", async (req, res) => {
             const query = {};
@@ -347,7 +359,6 @@ async function run() {
                 res.status(500).send({ error: error.message });
             }
         });
-
         app.patch('/payment-success', async (req, res) => {
             try {
                 const { session_id } = req.query;
@@ -430,8 +441,6 @@ async function run() {
                 });
             }
         });
-
-
         app.get("/payments", verifyFBToken, async (req, res) => {
             try {
                 const { email } = req.query;
