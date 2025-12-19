@@ -122,23 +122,99 @@ async function run() {
             res.send(result);
         });
 
+        // GET USER ROLE
+        app.get('/users/role/:email', verifyFBToken, async (req, res) => {
+            const email = req.params.email;
+            const query = { email: email };
+            const user = await userCollection.findOne(query);
 
+            // Return the role field, or default to 'user' if not found
+            let role = 'user';
+            if (user && user.role) {
+                role = user.role;
+            }
+
+            res.send({ role });
+        });
+
+        // ================= BOOKS MANAGEMENT =================
+
+        // GET ALL BOOKS (Public)
         app.get("/books", async (req, res) => {
             const result = await bookCollection.find().toArray();
             res.send(result);
         });
 
+        // GET ONE BOOK (Public)
         app.get("/books/:id", async (req, res) => {
-            const id = req.params.id
-            const query = { _id: new ObjectId(id) }
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
             const result = await bookCollection.findOne(query);
             res.send(result);
         });
 
-        app.post("/books", async (req, res) => {
-            const result = await bookCollection.insertOne(req.body);
+        // POST BOOK (Secured - Add New Book)
+        app.post("/books", verifyFBToken, async (req, res) => {
+            const item = req.body;
+            const result = await bookCollection.insertOne(item);
             res.send(result);
         });
+
+        app.patch("/books/:id",
+            verifyFBToken,
+            async (req, res) => {
+                const email = req.decode_email;
+                const id = req.params.id;
+                const item = req.body;
+
+                const user = await userCollection.findOne({ email });
+
+                if (!user) {
+                    return res.status(403).send({ message: "Forbidden" });
+                }
+
+                const book = await bookCollection.findOne({ _id: new ObjectId(id) });
+
+                // Admin can update any book
+                // Librarian can update only own books
+                if (
+                    user.role !== "admin" &&
+                    book.librarianEmail !== email
+                ) {
+                    return res.status(403).send({ message: "Unauthorized" });
+                }
+
+                const updatedDoc = {
+                    $set: {
+                        title: item.title,
+                        description: item.description,
+                        category: item.category,
+                        coverImage: item.coverImage,
+                        oldPrice: item.oldPrice,
+                        newPrice: item.newPrice,
+                        trending: item.trending
+                    }
+                };
+
+                const result = await bookCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    updatedDoc
+                );
+
+                res.send(result);
+            }
+        );
+
+
+        // DELETE BOOK (Secured - Remove Book)
+        app.delete('/books/:id', verifyFBToken, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) }
+            const result = await bookCollection.deleteOne(query);
+            res.send(result);
+        });
+
+        // ====================================================
 
         // GET ALL ORDERS
         app.get("/orders", async (req, res) => {
@@ -152,15 +228,13 @@ async function run() {
             const result = await ordersCollection.find(query).toArray();
             res.send(result);
         });
-
+        // GET ALL ORDERS by id 
         app.get("/orders/:id", async (req, res) => {
             const id = req.params.id
             const query = { _id: new ObjectId(id) }
             const result = await ordersCollection.findOne(query);
             res.send(result);
         });
-
-
         // CREATE ORDER
         app.post("/orders", async (req, res) => {
             const data = req.body;
@@ -181,9 +255,61 @@ async function run() {
             const result = await ordersCollection.insertOne(order);
             res.send(result);
         });
+        // CANCEL ORDER
+        app.patch('/orders/:id/cancel', async (req, res) => {
+            try {
+                const id = req.params.id;
+
+                const query = { _id: new ObjectId(id) };
+
+                const order = await ordersCollection.findOne(query);
+
+                if (!order) {
+                    return res.status(404).send({ success: false, message: 'Order not found' });
+                }
+
+                if (order.paymentStatus === 'paid') {
+                    return res.status(400).send({
+                        success: false,
+                        message: 'Paid orders cannot be cancelled'
+                    });
+                }
+
+                const update = {
+                    $set: {
+                        status: 'cancelled',
+                        cancelledAt: new Date()
+                    }
+                };
+
+                await ordersCollection.updateOne(query, update);
+
+                res.send({
+                    success: true,
+                    message: 'Order cancelled successfully'
+                });
+
+            } catch (error) {
+                res.status(500).send({ success: false, error: error.message });
+            }
+        });
+        //UPDTAE ORDER
+        app.patch('/orders/:id/status', async (req, res) => {
+            const { status } = req.body;
+            const id = req.params.id;
+
+            const result = await ordersCollection.updateOne(
+                { _id: new ObjectId(id) },
+                { $set: { status } }
+            );
+
+            res.send(result);
+        });
+
+
+
 
         //pyament gatway stripe 
-
         app.post('/payment-checkout-session', async (req, res) => {
             try {
                 const { cost, orderId, name, email } = req.body;
