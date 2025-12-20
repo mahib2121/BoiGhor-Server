@@ -84,11 +84,12 @@ async function run() {
 
             const newUser = {
                 email: user.email,
-                displayName: user.displayName,
+                displayName: user.name,
                 photoURL: user.photoURL,
                 role: "user",
                 createdAt: new Date()
             };
+
 
             const result = await userCollection.insertOne(newUser);
             res.send(result);
