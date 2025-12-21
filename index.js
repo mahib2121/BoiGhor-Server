@@ -1,21 +1,64 @@
 require('dotenv').config();
 const express = require('express');
-const app = express();
 const cors = require('cors');
-const stripe = require('stripe')(process.env.STRIPE)
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const admin = require("firebase-admin");
+const stripe = require('stripe')(process.env.STRIPE || process.env.STRIPE_SECRET_KEY);
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+// ================== MIDDLEWARE ==================
 app.use(express.json());
 app.use(
     cors({
-        origin: "http://localhost:5173",
+        origin: [
+            "http://localhost:5173",
+            "https://boi-ghor-kappa.vercel.app",
+            process.env.SITE_DOMAIN
+        ].filter(Boolean),
         credentials: true,
     })
 );
 
+// ================== FIREBASE ADMIN (ENV METHOD) ==================
+try {
+    if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+        throw new Error("FIREBASE_SERVICE_ACCOUNT is missing in .env file");
+    }
 
-const port = process.env.PORT || 3000;
+    const decoded = Buffer.from(
+        process.env.FIREBASE_SERVICE_ACCOUNT,
+        "base64"
+    ).toString("utf8");
 
-const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+    const serviceAccount = JSON.parse(decoded);
 
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+    });
+    console.log("Firebase Admin Initialized via ENV");
+} catch (error) {
+    console.error("Firebase Admin Error:", error.message);
+}
+
+// ================== AUTH MIDDLEWARE ==================
+const verifyFBToken = async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+        return res.status(401).send({ message: 'Unauthorized access' });
+    }
+    try {
+        const token = authHeader.split(' ')[1];
+        const decode = await admin.auth().verifyIdToken(token);
+        req.decode_email = decode.email;
+        next();
+    } catch (err) {
+        return res.status(401).send({ message: 'Unauthorized access' });
+    }
+}
+
+// ================== MONGODB SETUP ==================
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.yyxeibb.mongodb.net/?appName=Cluster0`;
 
 const client = new MongoClient(uri, {
@@ -25,31 +68,6 @@ const client = new MongoClient(uri, {
         deprecationErrors: true,
     }
 });
-const verifyFBToken = async (req, res, next) => {
-
-    const token = req.headers.authorization
-    try {
-        const IdToken = token.split(' ')[1]
-        const decode = await admin.auth().verifyIdToken(IdToken)
-        console.log(decode);
-        req.decode_email = decode.email
-
-    }
-    catch (err) {
-        return res.status(401).send({ message: 'Unauthrize access ' })
-    }
-    next()
-}
-
-const admin = require("firebase-admin");
-
-const serviceAccount = require("./boiGhorfirebase-adminsdk.json");
-
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-});
-
-
 
 let bookCollection;
 let ordersCollection;
@@ -58,9 +76,10 @@ let userCollection;
 
 async function run() {
     try {
-        await client.connect();
-
+        //await client.connect();
         const db = client.db("boiGhor");
+
+        // Collections
         bookCollection = db.collection("books");
         ordersCollection = db.collection("orders");
         paymentsCollection = db.collection("payments");
@@ -68,20 +87,18 @@ async function run() {
 
         console.log("MongoDB connected successfully");
 
+        // ================== USERS ROUTES ==================
 
-        // ---------- USERS ----------
+        // 1. CREATE USER
         app.post("/users", verifyFBToken, async (req, res) => {
             const user = req.body;
-
             if (req.decode_email !== user.email) {
                 return res.status(403).send({ message: "Forbidden" });
             }
-
             const existingUser = await userCollection.findOne({ email: user.email });
             if (existingUser) {
                 return res.send({ message: "User already exists" });
             }
-
             const newUser = {
                 email: user.email,
                 displayName: user.name,
@@ -89,33 +106,27 @@ async function run() {
                 role: "user",
                 createdAt: new Date()
             };
-
-
             const result = await userCollection.insertOne(newUser);
             res.send(result);
         });
 
-        // 1. GET ALL USERS (for the Table)
-        // verifyFBToken ensures only logged-in users can see this
+        // 2. GET ALL USERS
         app.get("/users", verifyFBToken, async (req, res) => {
             const result = await userCollection.find().toArray();
             res.send(result);
         });
 
-        // 2. MAKE ADMIN (for the "Make Admin" button)
-        // UPDATE USER ROLE (admin only)
+        // 3. UPDATE USER ROLE (Admin Only)
         app.patch('/users/role/:id', verifyFBToken, async (req, res) => {
             const requesterEmail = req.decode_email;
             const { role } = req.body;
             const id = req.params.id;
 
-            // allowed roles
             const allowedRoles = ["user", "librarian", "admin"];
             if (!allowedRoles.includes(role)) {
                 return res.status(400).send({ message: "Invalid role" });
             }
 
-            // verify requester is admin
             const requester = await userCollection.findOne({ email: requesterEmail });
             if (requester?.role !== "admin") {
                 return res.status(403).send({ message: "Forbidden" });
@@ -125,12 +136,10 @@ async function run() {
                 { _id: new ObjectId(id) },
                 { $set: { role } }
             );
-
             res.send(result);
         });
 
-
-        // 3. DELETE USER (for the "Delete" button)
+        // 4. DELETE USER
         app.delete('/users/:id', verifyFBToken, async (req, res) => {
             const id = req.params.id;
             const query = { _id: new ObjectId(id) }
@@ -138,38 +147,31 @@ async function run() {
             res.send(result);
         });
 
-        // GET USER ROLE
+        // 5. GET USER ROLE
         app.get('/users/role/:email', verifyFBToken, async (req, res) => {
             const email = req.params.email;
-            const query = { email: email };
-            const user = await userCollection.findOne(query);
-
-            // Return the role field, or default to 'user' if not found
+            const user = await userCollection.findOne({ email });
             let role = 'user';
             if (user && user.role) {
                 role = user.role;
             }
-
             res.send({ role });
         });
 
-        // GET CURRENT USER PROFILE
+        // 6. GET CURRENT USER PROFILE
         app.get("/users/profile", verifyFBToken, async (req, res) => {
             const email = req.decode_email;
             const user = await userCollection.findOne({ email });
-
             if (!user) {
                 return res.status(404).send({ message: "User not found" });
             }
-
             res.send(user);
         });
 
-        // UPDATE CURRENT USER PROFILE
+        // 7. UPDATE CURRENT USER PROFILE
         app.patch("/users/profile", verifyFBToken, async (req, res) => {
             const email = req.decode_email;
             const { displayName, photoURL } = req.body;
-
             const result = await userCollection.updateOne(
                 { email },
                 {
@@ -180,21 +182,18 @@ async function run() {
                     }
                 }
             );
-
             res.send(result);
         });
 
+        // ================== BOOKS ROUTES ==================
 
-
-        // ================= BOOKS MANAGEMENT =================
-
-        // GET ALL BOOKS (Public)
+        // GET ALL BOOKS
         app.get("/books", async (req, res) => {
             const result = await bookCollection.find().toArray();
             res.send(result);
         });
 
-        // GET ONE BOOK (Public)
+        // GET ONE BOOK
         app.get("/books/:id", async (req, res) => {
             const id = req.params.id;
             const query = { _id: new ObjectId(id) };
@@ -202,89 +201,82 @@ async function run() {
             res.send(result);
         });
 
-        // POST BOOK (Add New Book)
+        // ADD BOOK
         app.post("/books", verifyFBToken, async (req, res) => {
             const item = req.body;
             const result = await bookCollection.insertOne(item);
             res.send(result);
         });
 
-        app.patch("/books/:id",
-            verifyFBToken,
-            async (req, res) => {
-                const email = req.decode_email;
-                const id = req.params.id;
-                const item = req.body;
+        // UPDATE BOOK
+        app.patch("/books/:id", verifyFBToken, async (req, res) => {
+            const email = req.decode_email;
+            const id = req.params.id;
+            const item = req.body;
 
-                const user = await userCollection.findOne({ email });
-
-                if (!user) {
-                    return res.status(403).send({ message: "Forbidden" });
-                }
-
-                const book = await bookCollection.findOne({ _id: new ObjectId(id) });
-
-                // Admin can update any book
-                // Librarian can update only own books
-                if (
-                    user.role !== "admin" &&
-                    book.librarianEmail !== email
-                ) {
-                    return res.status(403).send({ message: "Unauthorized" });
-                }
-
-                const updatedDoc = {
-                    $set: {
-                        title: item.title,
-                        description: item.description,
-                        category: item.category,
-                        coverImage: item.coverImage,
-                        oldPrice: item.oldPrice,
-                        newPrice: item.newPrice,
-                        trending: item.trending
-                    }
-                };
-
-                const result = await bookCollection.updateOne(
-                    { _id: new ObjectId(id) },
-                    updatedDoc
-                );
-
-                res.send(result);
+            const user = await userCollection.findOne({ email });
+            if (!user) {
+                return res.status(403).send({ message: "Forbidden" });
             }
-        );
 
+            const book = await bookCollection.findOne({ _id: new ObjectId(id) });
 
-        // DELETE BOOK (Remove Book)
+            // Authorization Check
+            if (user.role !== "admin" && book.librarianEmail !== email) {
+                return res.status(403).send({ message: "Unauthorized" });
+            }
+
+            const updatedDoc = {
+                $set: {
+                    title: item.title,
+                    description: item.description,
+                    category: item.category,
+                    coverImage: item.coverImage,
+                    oldPrice: item.oldPrice,
+                    newPrice: item.newPrice,
+                    trending: item.trending
+                }
+            };
+
+            const result = await bookCollection.updateOne(
+                { _id: new ObjectId(id) },
+                updatedDoc
+            );
+            res.send(result);
+        });
+
+        // DELETE BOOK
         app.delete('/books/:id', verifyFBToken, async (req, res) => {
             const id = req.params.id;
             const query = { _id: new ObjectId(id) }
             const result = await bookCollection.deleteOne(query);
             res.send(result);
         });
+
+        // ================== ORDERS ROUTES ==================
+
         // GET ALL ORDERS
         app.get("/orders", async (req, res) => {
             const query = {};
             const { email } = req.query;
-
             if (email) {
                 query.email = email;
             }
-
             const result = await ordersCollection.find(query).toArray();
             res.send(result);
         });
-        // GET ALL ORDERS by id 
+
+        // GET SINGLE ORDER
         app.get("/orders/:id", async (req, res) => {
             const id = req.params.id
             const query = { _id: new ObjectId(id) }
             const result = await ordersCollection.findOne(query);
             res.send(result);
         });
+
         // CREATE ORDER
         app.post("/orders", async (req, res) => {
             const data = req.body;
-
             const order = {
                 userId: data.userId,
                 name: data.name,
@@ -297,23 +289,20 @@ async function run() {
                 paymentStatus: "unpaid",
                 createdAt: new Date()
             };
-
             const result = await ordersCollection.insertOne(order);
             res.send(result);
         });
+
         // CANCEL ORDER
         app.patch('/orders/:id/cancel', async (req, res) => {
             try {
                 const id = req.params.id;
-
                 const query = { _id: new ObjectId(id) };
-
                 const order = await ordersCollection.findOne(query);
 
                 if (!order) {
                     return res.status(404).send({ success: false, message: 'Order not found' });
                 }
-
                 if (order.paymentStatus === 'paid') {
                     return res.status(400).send({
                         success: false,
@@ -327,39 +316,33 @@ async function run() {
                         cancelledAt: new Date()
                     }
                 };
-
                 await ordersCollection.updateOne(query, update);
-
                 res.send({
                     success: true,
                     message: 'Order cancelled successfully'
                 });
-
             } catch (error) {
                 res.status(500).send({ success: false, error: error.message });
             }
         });
-        //UPDTAE ORDER
+
+        // UPDATE ORDER STATUS
         app.patch('/orders/:id/status', async (req, res) => {
             const { status } = req.body;
             const id = req.params.id;
-
             const result = await ordersCollection.updateOne(
                 { _id: new ObjectId(id) },
                 { $set: { status } }
             );
-
             res.send(result);
         });
 
+        // ================== STRIPE PAYMENT ROUTES ==================
 
-
-
-        //pyament gatway stripe 
+        // CREATE CHECKOUT SESSION
         app.post('/payment-checkout-session', async (req, res) => {
             try {
                 const { cost, orderId, name, email } = req.body;
-
                 const amount = Math.round(Number(cost) * 100);
 
                 const session = await stripe.checkout.sessions.create({
@@ -378,52 +361,37 @@ async function run() {
                     ],
                     mode: 'payment',
                     customer_email: email,
-
-
                     metadata: {
                         orderId: orderId
                     },
-
                     success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
                     cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancel`,
                 });
-
                 res.send({ url: session.url });
             } catch (error) {
                 res.status(500).send({ error: error.message });
             }
         });
+
+        // HANDLE PAYMENT SUCCESS
         app.patch('/payment-success', async (req, res) => {
             try {
                 const { session_id } = req.query;
-
                 if (!session_id) {
-                    return res.status(400).send({
-                        success: false,
-                        message: 'session_id missing'
-                    });
+                    return res.status(400).send({ success: false, message: 'session_id missing' });
                 }
 
-
                 const session = await stripe.checkout.sessions.retrieve(session_id);
-
                 if (session.payment_status !== 'paid') {
-                    return res.status(400).send({
-                        success: false,
-                        message: 'Payment not completed'
-                    });
+                    return res.status(400).send({ success: false, message: 'Payment not completed' });
                 }
 
                 const orderId = session.metadata?.orderId;
                 const paymentIntentId = session.payment_intent;
 
                 if (!orderId || !paymentIntentId) {
-                    return res.status(400).send({
-                        success: false,
-                        message: 'Invalid payment metadata'
-                    });
+                    return res.status(400).send({ success: false, message: 'Invalid payment metadata' });
                 }
-
 
                 const alreadyPaid = await paymentsCollection.findOne({
                     paymentId: paymentIntentId
@@ -437,7 +405,6 @@ async function run() {
                     });
                 }
 
-
                 await ordersCollection.updateOne(
                     { _id: new ObjectId(orderId) },
                     {
@@ -447,7 +414,6 @@ async function run() {
                         }
                     }
                 );
-
 
                 const paymentDoc = {
                     orderId: new ObjectId(orderId),
@@ -461,7 +427,6 @@ async function run() {
 
                 await paymentsCollection.insertOne(paymentDoc);
 
-
                 res.send({
                     success: true,
                     message: 'Payment recorded successfully',
@@ -469,25 +434,21 @@ async function run() {
                 });
 
             } catch (error) {
-                res.status(500).send({
-                    success: false,
-                    message: error.message
-                });
+                res.status(500).send({ success: false, message: error.message });
             }
         });
+
+        // GET PAYMENTS
         app.get("/payments", verifyFBToken, async (req, res) => {
             try {
                 const { email } = req.query;
-
                 if (!email) {
-                    return res.status(400).send({ message: "Email is required Or Unauthorize access " });
+                    return res.status(400).send({ message: "Email is required Or Unauthorized access" });
                 }
-
                 const result = await paymentsCollection
                     .find({ email })
                     .sort({ createdAt: -1 })
                     .toArray();
-
                 res.send(result);
             } catch (error) {
                 res.status(500).send({ message: error.message });
@@ -510,3 +471,11 @@ app.listen(port, () => {
     console.log(`Server is running on port ${port}`);
 });
 
+if (require.main === module) {
+    app.listen(port, () => {
+        console.log(`Server is running on port ${port}`);
+    });
+}
+
+// EXPORT THE APP FOR VERCEL
+module.exports = app;
